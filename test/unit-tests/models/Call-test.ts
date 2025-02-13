@@ -235,16 +235,16 @@ describe("JitsiCall", () => {
 
             ({ widget, messaging, audioMutedSpy, videoMutedSpy } = setUpWidget(call));
 
-            mocked(messaging.transport).send.mockImplementation(async (action: string): Promise<any> => {
+            mocked(messaging.transport).send.mockImplementation(async (action, data): Promise<any> => {
                 if (action === ElementWidgetActions.JoinCall) {
                     messaging.emit(
                         `action:${ElementWidgetActions.JoinCall}`,
-                        new CustomEvent("widgetapirequest", { detail: {} }),
+                        new CustomEvent("widgetapirequest", { detail: { data } }),
                     );
                 } else if (action === ElementWidgetActions.HangupCall) {
                     messaging.emit(
                         `action:${ElementWidgetActions.HangupCall}`,
-                        new CustomEvent("widgetapirequest", { detail: {} }),
+                        new CustomEvent("widgetapirequest", { detail: { data } }),
                     );
                 }
                 return {};
@@ -286,8 +286,6 @@ describe("JitsiCall", () => {
             expect(call.connectionState).toBe(ConnectionState.Disconnected);
 
             const connect = call.start();
-            expect(call.connectionState).toBe(ConnectionState.WidgetLoading);
-
             WidgetMessagingStore.instance.storeMessaging(widget, room.roomId, messaging);
             await connect;
             expect(call.connectionState).toBe(ConnectionState.Connected);
@@ -310,7 +308,6 @@ describe("JitsiCall", () => {
             expect(call.connectionState).toBe(ConnectionState.Disconnected);
 
             const connect = call.start();
-            expect(call.connectionState).toBe(ConnectionState.WidgetLoading);
             async function runTimers() {
                 jest.advanceTimersByTime(500);
                 jest.advanceTimersByTime(1000);
@@ -358,16 +355,10 @@ describe("JitsiCall", () => {
 
             messaging.emit(
                 `action:${ElementWidgetActions.HangupCall}`,
-                new CustomEvent("widgetapirequest", { detail: {} }),
+                new CustomEvent("widgetapirequest", { detail: { data: { cause: "user" } } }),
             );
             await waitFor(() => {
                 expect(callback).toHaveBeenNthCalledWith(1, ConnectionState.Disconnected, ConnectionState.Connected);
-                expect(callback).toHaveBeenNthCalledWith(
-                    2,
-                    ConnectionState.WidgetLoading,
-                    ConnectionState.Disconnected,
-                );
-                expect(callback).toHaveBeenNthCalledWith(3, ConnectionState.Connecting, ConnectionState.WidgetLoading);
             });
             // in video rooms we expect the call to immediately reconnect
             call.off(CallEvent.ConnectionState, callback);
@@ -497,10 +488,7 @@ describe("JitsiCall", () => {
             await call.start();
             await call.disconnect();
             expect(onConnectionState.mock.calls).toEqual([
-                [ConnectionState.WidgetLoading, ConnectionState.Disconnected],
-                [ConnectionState.Connecting, ConnectionState.WidgetLoading],
-                [ConnectionState.Lobby, ConnectionState.Connecting],
-                [ConnectionState.Connected, ConnectionState.Lobby],
+                [ConnectionState.Connected, ConnectionState.Disconnected],
                 [ConnectionState.Disconnecting, ConnectionState.Connected],
                 [ConnectionState.Disconnected, ConnectionState.Disconnecting],
             ]);
@@ -634,7 +622,7 @@ describe("ElementCall", () => {
         jest.spyOn(room, "getJoinedMembers").mockReturnValue(memberIds.map((id) => ({ userId: id }) as RoomMember));
     }
 
-    const callConnectProcedure: (call: ElementCall) => Promise<void> = async (call) => {
+    const callConnectProcedure = async (call: ElementCall, startWidget = true): Promise<void> => {
         async function sessionConnect() {
             await new Promise<void>((r) => {
                 setTimeout(() => r(), 400);
@@ -653,9 +641,7 @@ describe("ElementCall", () => {
             jest.advanceTimersByTime(500);
         }
         sessionConnect();
-        const promise = call.start();
-        runTimers();
-        await promise;
+        await Promise.all([...(startWidget ? [call.start()] : []), runTimers()]);
     };
     const callDisconnectionProcedure: (call: ElementCall) => Promise<void> = async (call) => {
         async function sessionDisconnect() {
@@ -683,6 +669,7 @@ describe("ElementCall", () => {
     });
 
     afterEach(() => {
+        jest.runOnlyPendingTimers();
         jest.useRealTimers();
         cleanUpClientRoomAndStores(client, room);
     });
@@ -876,9 +863,6 @@ describe("ElementCall", () => {
             expect(call.connectionState).toBe(ConnectionState.Disconnected);
 
             const connect = callConnectProcedure(call);
-
-            expect(call.connectionState).toBe(ConnectionState.WidgetLoading);
-
             WidgetMessagingStore.instance.storeMessaging(widget, room.roomId, messaging);
             await connect;
             expect(call.connectionState).toBe(ConnectionState.Connected);
@@ -905,7 +889,7 @@ describe("ElementCall", () => {
 
             messaging.emit(
                 `action:${ElementWidgetActions.HangupCall}`,
-                new CustomEvent("widgetapirequest", { detail: {} }),
+                new CustomEvent("widgetapirequest", { detail: { data: { cause: "user" } } }),
             );
             await waitFor(() => expect(call.connectionState).toBe(ConnectionState.Disconnected), { interval: 5 });
         });
@@ -986,9 +970,7 @@ describe("ElementCall", () => {
             await callConnectProcedure(call);
             await callDisconnectionProcedure(call);
             expect(onConnectionState.mock.calls).toEqual([
-                [ConnectionState.WidgetLoading, ConnectionState.Disconnected],
-                [ConnectionState.Connecting, ConnectionState.WidgetLoading],
-                [ConnectionState.Connected, ConnectionState.Connecting],
+                [ConnectionState.Connected, ConnectionState.Disconnected],
                 [ConnectionState.Disconnecting, ConnectionState.Connected],
                 [ConnectionState.Disconnected, ConnectionState.Disconnecting],
             ]);
@@ -1165,10 +1147,12 @@ describe("ElementCall", () => {
 
             messaging.emit(
                 `action:${ElementWidgetActions.HangupCall}`,
-                new CustomEvent("widgetapirequest", { detail: {} }),
+                new CustomEvent("widgetapirequest", { detail: { data: { cause: "user" } } }),
             );
-            // We want the call to be connecting after the hangup.
-            waitFor(() => expect(call.connectionState).toBe(ConnectionState.Connecting), { interval: 5 });
+            // We should now be able to reconnect without manually starting the widget
+            expect(call.connectionState).toBe(ConnectionState.Disconnected);
+            await callConnectProcedure(call, false);
+            await waitFor(() => expect(call.connectionState).toBe(ConnectionState.Connected), { interval: 5 });
         });
     });
     describe("create call", () => {
